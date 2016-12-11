@@ -4,6 +4,8 @@ import akka.http.scaladsl.marshalling.{Marshaller, ToEntityMarshaller}
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.unmarshalling.{FromRequestUnmarshaller, Unmarshaller}
 import akka.stream.Materializer
+import com.hamlazot.common.macros.serialization.MacroSerializer
+import com.hamlazot.common.macros.Macros.{Mapper, Serializer}
 import com.hamlazot.common.serialization.{CamelcaseDeseiralizationTransformer, JsonSerializer, SnakecaseSerializationTransformer}
 
 import scala.concurrent.duration._
@@ -14,15 +16,31 @@ import scala.util.Try
  * Created by yoav on 1/18/16.
  */
 
-trait JsonMarshalling extends JsonSerializer with CamelcaseDeseiralizationTransformer with SnakecaseSerializationTransformer {
+trait JsonMarshalling
+  extends MacroSerializer
+  with CamelcaseDeseiralizationTransformer
+  with SnakecaseSerializationTransformer {
+
   val jsonMediaType = MediaTypes.`application/json`
   val jsonContentType = ContentTypes.`application/json`
 
+
   implicit def anyRefMarsheller[A <: AnyRef]: ToEntityMarshaller[A] = {
     Marshaller.withFixedContentType(jsonMediaType) {
-      (anyRef: AnyRef) => HttpEntity(ContentType(jsonMediaType), serialize(anyRef))
+      (anyRef: AnyRef) =>
+        HttpEntity(ContentType(jsonMediaType), serialize(anyRef))
     }
   }
+
+  def seriamap[A: Mapper]: ToEntityMarshaller[A] = {
+    val mapper = implicitly[Mapper[A]]
+    Marshaller.withFixedContentType[A, akka.http.scaladsl.model.MessageEntity](jsonMediaType) {
+      (a: A) =>
+        val map = mapper.toMap(a)
+        HttpEntity(ContentType(jsonMediaType), serialize(map))
+    }
+  }
+
 
   implicit def anyValMarsheller[A <: AnyVal]: ToEntityMarshaller[A] = {
     Marshaller.withFixedContentType(jsonMediaType) {
@@ -33,6 +51,7 @@ trait JsonMarshalling extends JsonSerializer with CamelcaseDeseiralizationTransf
   implicit def anyRefUnmarshaller[A: Manifest]: FromRequestUnmarshaller[A] = {
     new Unmarshaller[HttpRequest, A] {
       override def apply(value: HttpRequest)(implicit ec: ExecutionContext, materializer: Materializer): Future[A] = {
+
         value.entity.withContentType(jsonContentType).toStrict(5 seconds).map(_.data.toArray).map(x => {
           deserialize[A](new String(x))
         })
@@ -41,20 +60,34 @@ trait JsonMarshalling extends JsonSerializer with CamelcaseDeseiralizationTransf
     }
   }
 
-  implicit def anyRefTryMarsheller[A <: AnyRef]: ToEntityMarshaller[Try[A]] = {
-    Marshaller.withFixedContentType(jsonMediaType) {
-      (anyRef: AnyRef) => HttpEntity(ContentType(jsonMediaType), serialize(anyRef))
+  def asVal[A: Manifest](implicit um: Serializer[A]): akka.http.scaladsl.unmarshalling.FromRequestUnmarshaller[A] = new Unmarshaller[HttpRequest, A] {
+    override def apply(value: HttpRequest)(implicit ec: ExecutionContext, materializer: Materializer): Future[A] = {
+      val castable = implicitly[Serializer[A]]
+      value.entity.withContentType(jsonContentType).toStrict(5 seconds).map(_.data.toArray).map(x => {
+        val jsonStr = new String(x)
+        val result = castable.deserializ(jsonStr)
+        result
+      })
     }
   }
 
-  implicit def anyRefTryUnmarshaller[A: Manifest, E <: Enumeration]: FromRequestUnmarshaller[Try[A]] = {
-    new Unmarshaller[HttpRequest, Try[A]] {
+  def asTry[A: Manifest](implicit um: Serializer[A]): akka.http.scaladsl.unmarshalling.FromRequestUnmarshaller[Try[A]] = new Unmarshaller[HttpRequest, Try[A]] {
+    import com.hamlazot.common.macros.Macros.Serializer
+    override def apply(value: HttpRequest)(implicit ec: ExecutionContext, materializer: Materializer): Future[Try[A]] = {
 
-      override def apply(value: HttpRequest)(implicit ec: ExecutionContext, materializer: Materializer): Future[Try[A]] = {
-        value.entity.withContentType(jsonContentType).toStrict(5 seconds).map(_.data.toArray).map(x => {
-          Try(deserialize[A](new String(x)))
-        })
-      }
+      value.entity.withContentType(jsonContentType).toStrict(5 seconds).map(_.data.toArray).map(x => {
+        val jsonStr = new String(x)
+        Try {
+          val result = marshal[A](jsonStr)
+          result
+        }
+      })
+    }
+  }
+
+  implicit def anyRefTryMarsheller[A <: AnyRef]: ToEntityMarshaller[Try[A]] = {
+    Marshaller.withFixedContentType(jsonMediaType) {
+      (anyRef: AnyRef) => HttpEntity(ContentType(jsonMediaType), serialize(anyRef))
     }
   }
 
